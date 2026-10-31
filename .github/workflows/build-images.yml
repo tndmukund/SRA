@@ -1,0 +1,83 @@
+name: Build OT Sense images
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  iso:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - run: unzip -q source.zip
+      - name: Build ISO
+        run: sudo bash sensor-image/build-iso.sh otsense-central/sensor-src
+      - name: Check guacd is inside
+        run: |
+          sudo apt-get install -y -qq squashfs-tools
+          sudo mkdir -p /mnt/iso && sudo mount -o loop,ro sensor-image/images/otsense-sensor.iso /mnt/iso
+          SQ=$(sudo find /mnt/iso -name filesystem.squashfs | head -1)
+          sudo unsquashfs -l "$SQ" > /tmp/f.txt
+          grep -q usr/sbin/guacd /tmp/f.txt
+          grep -q libguac-client-rdp /tmp/f.txt
+          grep -q opt/otsense/otsense.py /tmp/f.txt
+          sudo umount /mnt/iso
+      - uses: actions/upload-artifact@v4
+        with: { name: iso, path: sensor-image/images/otsense-sensor.iso, compression-level: 0 }
+  winapp:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - shell: bash
+        run: |
+          unzip -q source.zip
+          pip install pyinstaller==6.11.1 scapy colorama
+          cd otsense-central/sensor-src
+          pyinstaller --onefile --console --name OTSense-Sensor --collect-all scapy --hidden-import tkinter otsense.py
+          [ "$(stat -c %s dist/OTSense-Sensor.exe)" -gt 10000000 ]
+      - uses: actions/upload-artifact@v4
+        with: { name: winapp, path: otsense-central/sensor-src/dist/OTSense-Sensor.exe }
+  central:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: unzip -q source.zip
+      - run: node --check otsense-central/central.js
+      - name: Guacamole browser library
+        run: |
+          mkdir -p otsense-central/public/vendor /tmp/g && cd /tmp/g
+          npm pack guacamole-common-js@1.5.0
+          tar xzf guacamole-common-js-*.tgz
+          F=$(find package -name 'guacamole-common.min.js' | head -1)
+          [ -n "$F" ] || F=$(find package -name 'guacamole-common*.js' ! -name '*.map' | head -1)
+          [ -n "$F" ]
+          cp "$F" "$GITHUB_WORKSPACE/otsense-central/public/vendor/guacamole-common.min.js"
+      - name: Zip for Plesk (no data, no web.config)
+        run: |
+          cd otsense-central
+          zip -r -q ../otsense-central-upload.zip . -x 'data/*' 'images/*' 'sensor-src/__pycache__/*' 'web.config' '.user.ini' 'public/web.config' 'public/.user.ini'
+      - uses: actions/upload-artifact@v4
+        with: { name: central, path: otsense-central-upload.zip }
+  release:
+    needs: [iso, winapp, central]
+    if: ${{ !cancelled() && needs.iso.result == 'success' && needs.central.result == 'success' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: art }
+      - name: Assemble
+        run: |
+          mkdir base-images
+          cp art/iso/otsense-sensor.iso base-images/
+          if [ -f art/winapp/OTSense-Sensor.exe ]; then cp art/winapp/OTSense-Sensor.exe base-images/; else cp OTSense-Sensor.exe base-images/; fi
+          cp OTSense-VM.exe base-images/
+          (cd base-images && zip -0 -q ../base-images.zip *)
+      - name: Publish
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          gh release create "images-$(date -u +%Y%m%d-%H%M)" base-images.zip base-images/otsense-sensor.iso art/central/otsense-central-upload.zip \
+            --repo "$GITHUB_REPOSITORY" --title "OT Sense images" --notes "Download the three files."
