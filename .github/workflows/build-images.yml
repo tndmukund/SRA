@@ -11,7 +11,9 @@ jobs:
       - uses: actions/checkout@v4
       - run: unzip -q source.zip
       - name: Build ISO
-        run: sudo bash sensor-image/build-iso.sh otsense-central/sensor-src
+        run: |
+          sudo bash sensor-image/docker-build.sh iso-amd64 otsense-central/sensor-src
+          ls -lh sensor-image/images/
       - name: Check guacd is inside
         run: |
           sudo apt-get install -y -qq squashfs-tools
